@@ -1,25 +1,34 @@
+import os
 import random
+import asyncio
 from dotenv import load_dotenv
+
+# Load env vars before anything that might read them
+load_dotenv(".env.local")
+
 from livekit import agents
 from livekit.agents import (
     AgentServer,
     AgentSession,
     Agent,
+    ChatContext,
+    ChatMessage,
     inference,
     room_io,
     TurnHandlingOptions,
 )
 from livekit.plugins import ai_coustics
+from mem0 import AsyncMemoryClient
 
-from tools import get_weather,send_email
+from tools import get_weather, send_email
 
-load_dotenv(".env.local")
-from mem0 import MemoryClient
+mem0 = AsyncMemoryClient(api_key=os.environ["MEM0_API_KEY"])
 
-client = MemoryClient(api_key="m0-ivv6SPaZVI9I7OoSYUSqzn842hTozmyy2uy0n5LV")
+DEFAULT_USER_ID = "prachethan"
+
 
 class Assistant(Agent):
-    def __init__(self) -> None:
+    def __init__(self, user_id: str) -> None:
         super().__init__(
             instructions="""You are Kade, a helpful voice AI assistant and AI partner.
 
@@ -34,8 +43,6 @@ If the user asks something simple, give a simple answer.
 If the user needs detailed help, explain it clearly.
 Never use complex formatting, emojis, asterisks, or unnecessary symbols in your spoken responses.
 
-
-
 You have two tools available:
 
 1. get_weather - use this whenever the user asks about weather, temperature,
@@ -49,6 +56,42 @@ You have two tools available:
 """,
             tools=[get_weather, send_email],
         )
+        self.user_id = user_id
+        self._bg_tasks: set[asyncio.Task] = set()
+
+    async def on_user_turn_completed(
+        self, turn_ctx: ChatContext, new_message: ChatMessage
+    ) -> None:
+        text = new_message.text_content
+        if not text:
+            return
+
+        # Look up relevant memories and give them to the LLM for this turn
+        try:
+            res = await mem0.search(text, filters={"user_id": self.user_id})
+            items = res["results"] if isinstance(res, dict) else res
+            facts = "\n".join(m["memory"] for m in items)
+            if facts:
+                turn_ctx.add_message(
+                    role="assistant",
+                    content=f"Things you know about the user:\n{facts}",
+                )
+        except Exception as e:
+            print(f"mem0 search failed: {e}")
+
+        # Save the message in the background so it doesn't slow the reply
+        task = asyncio.create_task(self._save_memory(text))
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+
+    async def _save_memory(self, text: str) -> None:
+        try:
+            await mem0.add(
+                [{"role": "user", "content": text}],
+                user_id=self.user_id,
+            )
+        except Exception as e:
+            print(f"mem0 add failed: {e}")
 
 
 server = AgentServer()
@@ -76,7 +119,7 @@ async def my_agent(ctx: agents.JobContext):
 
     await session.start(
         room=ctx.room,
-        agent=Assistant(),
+        agent=Assistant(user_id=DEFAULT_USER_ID),
         room_options=room_io.RoomOptions(
             video_input=True,
             audio_input=room_io.AudioInputOptions(
@@ -99,14 +142,8 @@ async def my_agent(ctx: agents.JobContext):
         "Hey, it's Kade. Don't be shy. Ask me something interesting.",
         "Kade here. Let's skip the boring stuff. What do you need?",
     ]
-    messages = [
-        { "role": "user", "content": "Hi, I'm Prachethan. I'm a vegetarian and I'm allergic to nuts." },
-        { "role": "assistant", "content": "Hello Prachethan! I see that you're a vegetarian with a nut allergy." }
-    ]
 
-    client.add(messages, user_id="prachethan")
-    query = "What can I cook for dinner tonight?"
-    client.search(query, filters={"user_id": "prachethan"})
+    await session.say(random.choice(welcome_messages))
 
 
 if __name__ == "__main__":
