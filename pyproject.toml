@@ -1,0 +1,12 @@
+[project]
+name = "kade-ai"
+version = "0.1.0"
+description = "Kade AI Voice Assistant"
+requires-python = ">=3.10"
+dependencies = [
+    "python-dotenv",
+    "livekit-agents",
+    "livekit-plugins-ai-coustics",
+    "livekit-plugins-google",
+    "mem0ai"
+]
